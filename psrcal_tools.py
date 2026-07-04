@@ -3,6 +3,9 @@ Useful functions for pulsar scintillation processing.
 r'''
 
 from numpy import *
+from matplotlib.pyplot import *
+from scipy.interpolate import interp1d
+from astropy.convolution import convolve,Box1DKernel
 
 def mask_region(datarr,freqarr,freq1,freq2,inmask=None): # freqarr should be ordered from low to high freqs
     # masks frequency channels between freq1 and freq2
@@ -41,14 +44,40 @@ def RFImask(data_cut,stdnum):
     else:
         return data_cut,mask
 
-def readhdu(data,dat_row,pol): # data = hdu[1].data
+def RFIzaptime(data_cut,stdnum,pulse_edge):
+    # flag RFI
+    mask = zeros(shape(data_cut))
+    spec_cut = data_cut[:,pulse_edge:] # grab data to right of pulse
+    #stdspec = std(spec_cut)
+    #meanspec = mean(spec_cut)
+    #print(stdspec,meanspec)
+    flag_inds = []
+    #for i in range(len(spec_cut[:,0])):
+    row = mean(spec_cut,axis=0)
+    stdspec = std(row)
+    meanspec = mean(row)
+    #print(mean(row))
+    upthresh = stdnum*stdspec + meanspec
+    lowthresh = meanspec - stdnum*stdspec
+    flags1 = where(row<upthresh)[0] + pulse_edge
+    flags2 = where(row>upthresh)[0] + pulse_edge
+    flag_inds = array(flag_inds)
+    if len(flag_inds)>0:
+        mask[:,flag_inds] = 1
+        maskspec = ma.masked_array(data_cut,mask=mask)
+        return maskspec,mask
+
+    else:
+        return data_cut,mask
+
+def readhdu(fhdu,dat_row,pol):
     """
     calculate uncalibrated intensities for one row in the data file (one row = 0.1 s)
-    inputs = hdu data, data row index, pol (0=aa,1=bb,2=cr,3=ci,-1=total intensity)
+    inputs = hdu, data row index, pol (0=aa,1=bb,2=cr,3=ci,-1=total intensity)
     returns data, frequencies, image extent for 2d plotting
     """
     
-    #data = fhdu[1].data
+    data = fhdu[1].data
     freqs = data[dat_row]['DAT_FREQ']
     tsamp = data[dat_row]['TSUBINT']/1024 # 98 microseconds -- sampling time
     tsubint = data[dat_row]['TSUBINT'] # subint time = 0.1 s
@@ -86,6 +115,7 @@ def shiftit(y, shift):
     work.real = c * yfft.real - s * yfft.imag
     work.imag = c * yfft.imag + s * yfft.real
 
+
     # enforce hermiticity:
     nhalf = int(size(y)/2)
     nhalf_arr = arange(nhalf)
@@ -100,4 +130,127 @@ def shiftit(y, shift):
 
 def gaussian(x, mu, sig, A):
     return A*exp(-power(x - mu, 2.) / (2 * power(sig, 2.)))
+
+def calc_secspec(dss,dT,dF,nT,nF):
+    ss = abs(fft.fftshift(fft.fft2(dss)))**2.
+    find = int(shape(ss)[0]/2)
+    sshalf = ss[find:,:]
+    ssconjT = fft.fftshift(fft.fftfreq(nT, d=dT))
+    ssconjF = fft.fftshift(fft.fftfreq(nF, d=dF))
+    ssconjF_half = ssconjF[-find-1:-1] # to get zero point right
+    return sshalf,ssconjT,ssconjF_half
+
+def parabola(eta,y):
+    return sqrt(y/eta) # operate on indices
+
+def parabfit(secspec,curv_min,curv_max,dt,dlambda,min_fd,max_fd):
+    '''
+    inputs: secondary spectrum (either pos. or neg. ft half), in log10 units
+            min, max curvatures to sum over
+            sampling resolution in ft and flambda
+            minimum index in flambda to start summing from
+            maximum index in flambda to start summing from
+    '''
+    eta_arr = logspace(log10(curv_min),log10(curv_max),1000)
+    eta_arr_datunits = eta_arr*dlambda/((dt*1000)**2)
+    y = arange(min_fd,max_fd,1)
+    parab_arr = array([parabola(eta_arr[i],y) for i in range(len(eta_arr))],dtype=int)  
+    ft_len = len(secspec[0,:])
+    sums = []
+    for n,pi in enumerate(parab_arr):
+        pi = delete(pi,where(pi>=ft_len)) # get rid of delay values larger than data extent
+        slic = array([secspec[y[i],pi[i]] for i in range(len(pi))])
+        power = ma.mean(slic) # do mean on log10 if ssh1 != caltest
+        sums.append(power)
+    sums = array(sums)
+    return eta_arr_datunits,sums
+
+'''
+def dist_eff(x,vp,dist):
+    
+    #input eta in m^-1 mHz^-2, vp in km/s, dist in kpc
+    
+    eta2 = x*(1e6) # convert from mHz^-2 to s^2
+    vp2 = vp*1000. # convert from km/s to m/s
+    dist2 = dist*(3.086e+19) # convert from kpc to m
+    fac1 = 2.*eta2*(vp2**2)/dist2
+    s = 1./(fac1**(-1) + 1)
+    #deff2 = deff/(3.086e+16) # convert from m to pc
+    return s
+
+def eta_from_s(x,vp,dist):
+    dist2 = dist*(3.086e+19) # m
+    vp2 = vp*1000 # m/s
+    denom = 2*((1-x)*(vp))**2
+    eta = dist*x*(1-x)/denom
+    eta2 = eta/1e6 # convert s^2 to mHz^-2
+    return eta2
+'''
+
+
+def fill_dynspec(freqs_up,freqs_low,dss_low,obs_time):
+	'''
+	Fill dynamic spectrum in lower frequency band with zeros to match size of upper band.
+	'''
+	fsamp = freqs_up[1]-freqs_up[0]
+	lowfill = zeros((len(freqs_up)-len(freqs_low),len(obs_time)))
+	dsslowfill = concatenate((dss_low,lowfill))
+	freqs = arange(min(freqs_low),min(freqs_low) + len(freqs_up)*fsamp,fsamp)
+	return dsslowfill,freqs
+
+
+def secspec_lambdagrid(dss,freqs_up,freqs_low,obs_time,lowband=False,lowband_fill=False,cutnoise=False):
+
+	c = 2.998e+8 # m/s
+
+	if lowband:
+		freqs = copy(freqs_low)
+	else:
+		freqs = copy(freqs_up)
+
+	# applying hanning window before resampling works better
+	window2d = sqrt(outer(hanning(len(freqs)),hanning(len(obs_time))))
+	dss = dss*window2d
+
+	if lowband_fill:
+		dss,freqs = fill_dynspec(freqs_up,freqs_low,dss,obs_time)
+
+	lambdas = c/(freqs*1e6) # freqs_up originally MHz
+	lambdas_grid = linspace(max(lambdas),min(lambdas),len(freqs)) # equi-spaced wavelength grid
+	ds_f = interp1d(lambdas,dss,kind='zero',axis=0)
+
+	ds_regrid = ds_f(lambdas_grid)
+
+	dt = abs(obs_time[1]-obs_time[0])
+	dl = abs(lambdas_grid[1]-lambdas_grid[0])
+	nt = len(obs_time)
+	nl = len(lambdas_grid)
+
+	ss,ft,fd = calc_secspec(ds_regrid,dt,dl,nt,nl)
+	ss = ss[1:,:]
+
+	ss_offarc1 = log10(mean(ss[:,:50],axis=1))
+	ss_offarc2 = log10(mean(ss[:,-50:],axis=1))
+	ss_offarc = mean((ss_offarc1,ss_offarc2),axis=0)
+
+	ss_offarc_smooth = convolve(ss_offarc,Box1DKernel(6),boundary='extend')
+	ss_offarc_smooth[0] = ss_offarc[0]
+
+	mean_offarc = mean(ss_offarc_smooth[500:])
+	print(mean_offarc)
+
+	if cutnoise:
+		# remove noise
+		caltest = zeros(shape(ss))
+		for i in range(len(ss[0,:])):
+			col = log10(ss[:,i])
+			col -= ss_offarc_smooth
+			caltest[:,i] = col + mean_offarc # to compare directly with pre-subtraction
+		return caltest,ft,fd
+
+	else:
+		return ss,ft,fd
+
+
+
 
