@@ -201,6 +201,18 @@ def fill_dynspec(freqs_up,freqs_low,dss_low,obs_time):
 
 def secspec_lambdagrid(dss,freqs_up,freqs_low,obs_time,lowband=False,lowband_fill=False,cutnoise=False):
 
+	'''
+	Calculates secondary spectrum from a dynamic spectrum that is resampled on an equispaced wavelength grid.
+	Inputs:
+		dss = dynamic spectrum
+		freqs_up = frequency array (upper part of band)
+		freqs_low = frequency array (lower part of band -- set equal to freqs_up if using a single continuous bandpass)
+		obs_time = time array (subintegrations)
+		lowband = False by default; true if using multiple bandpasses and calculating for the lower frequency band
+		lowband_fill = False by default; doesn't actually get used in this iteration of the code
+		cutnoise = False by default, but generally you want this to be True to remove nonlinear noise that arises in the secondary spectrum from the interpolation
+	'''
+	
 	c = 2.998e+8 # m/s
 
 	if lowband:
